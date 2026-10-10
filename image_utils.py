@@ -1,14 +1,34 @@
 
 import uuid
 from io import BytesIO
-from pathlib import Path
 
+import boto3
+from starlette.concurrency import run_in_threadpool
 from PIL import Image, ImageOps
+from config import settings
 
-PROFILE_PICS_DIR = Path("media/profile_pics")
 
 
-def process_profile_image(content:bytes)-> str:
+
+# _get_s3_client helper for image_utils.py
+def _get_s3_client():
+    return boto3.client(
+        "s3",
+        region_name=settings.S3_REGION,
+        aws_access_key_id=(
+            settings.S3_ACCESS_KEY_ID
+            if settings.S3_ACCESS_KEY_ID
+            else None
+        ),
+        aws_secret_access_key=(
+            settings.S3_SECRET_KEY_ID
+            if settings.S3_SECRET_KEY_ID
+            else None
+        ),
+        endpoint_url=settings.S3_ENDPOINT_URL,
+    )
+
+def process_profile_image(content:bytes)-> tuple[bytes, str]:
     with Image.open(BytesIO(content)) as original:
         img = ImageOps.exif_transpose(original)
 
@@ -18,18 +38,38 @@ def process_profile_image(content:bytes)-> str:
             img = img.convert("RGB")
 
         filename = f"{uuid.uuid4().hex}.jpg"
-
-        filepath = PROFILE_PICS_DIR / filename
-        PROFILE_PICS_DIR.mkdir(parents=True, exist_ok=True)
-        img.save(filepath, "JPEG", quality = 85, optimize= True)
-
-    return filename
+        outputs = BytesIO()
 
 
-def delete_profile_image(filename: str | None) -> None:
+        img.save(outputs, "JPEG", quality = 85, optimize= True)
+        outputs.seek(0)
+
+    return outputs.read(), filename
+
+# _upload_to_s3 and _delete_from_s3 for image_utils.py
+def _upload_to_s3(file_bytes: bytes, key: str) -> None:
+    s3 = _get_s3_client()
+    s3.upload_fileobj(
+        BytesIO(file_bytes),
+        settings.S3_BUCKET_NAME,
+        key,
+        ExtraArgs={"ContentType": "image/jpeg"},
+    )
+
+
+def _delete_from_s3(key: str) -> None:
+    s3 = _get_s3_client()
+    s3.delete_object(Bucket=settings.S3_BUCKET_NAME, Key=key)
+
+
+async def upload_profile_image(file_bytes: bytes, filename: str) -> None:
+    key = f"profile_pics/{filename}"
+    await run_in_threadpool(_upload_to_s3, file_bytes, key)
+
+
+async def delete_profile_image(filename: str | None) -> None:
     if filename is None:
         return
-    
-    filepath = PROFILE_PICS_DIR / filename
-    if filepath.exists():
-        filepath.unlink()
+
+    key = f"profile_pics/{filename}"
+    await run_in_threadpool(_delete_from_s3, key)

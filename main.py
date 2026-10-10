@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse ## This is used to specify that the r
 from fastapi.templating import Jinja2Templates ## This is used to render HTML templates using the Jinja2 templating engine. It allows you to create dynamic HTML pages by passing data to the templates and rendering them with the provided data.
 from starlette.exceptions import HTTPException as StarletteHTTPException ## This is used to handle HTTP exceptions that may occur during the processing of requests. It allows you to catch and handle specific HTTP errors, such as 404 Not Found or 500 Internal Server Error, and return custom responses or error pages.    
 from typing import Annotated 
-from sqlalchemy import select,func
+from sqlalchemy import select,func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 import models
 from database import Base, engine, get_db
@@ -22,11 +22,13 @@ from config import settings
 
 
 
+
+
 # Base.metadata.create_all(bind=engine)
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # async with engine.begin() as conn:
+    #     await conn.run_sync(Base.metadata.create_all)
     yield
     await engine.dispose()
 
@@ -40,8 +42,33 @@ templates = Jinja2Templates(directory="templates")
 app.include_router(users.router, prefix="/api/users", tags=["users"])
 app.include_router(posts.router, prefix="/api/posts", tags=["posts"])  
 
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
 
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["X-Content-Type-Options"] = "nosniff"
 
+    if "Referrer-Policy" not in response.headers:
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+
+    if request.url.hostname not in ("localhost", "127.0.0.1"):
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=63072000; includeSubDomains"
+        )
+
+    return response
+
+@app.get("/health")
+async def health_check(db: Annotated[AsyncSession, Depends(get_db)]):
+    try:
+        await db.execute(text("SELECT 1"))
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database connection error",
+        ) from e
+    return {"status": "healthy"}
 
 
 
@@ -116,6 +143,22 @@ async def account_page(request:Request):
         {"title": "Account"}
     )
 
+
+@app.get("/forgot-password", include_in_schema=False)
+async def forgot_password_page(request:Request):
+    return templates.TemplateResponse(
+        request,
+        "forgot_password.html",
+        {"title": "Forgot Password"}
+    )
+
+@app.get("/reset-password", include_in_schema=False)
+async def reset_password_page(request:Request):
+    return templates.TemplateResponse(
+        request,
+        "reset_password.html",
+        {"title": "Reset Password"}
+    )
 
 
 @app.get("/login", include_in_schema=False)
